@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Python version: 3.6
-from operator import le
 import sys,os
 path = os.path.dirname("D:\Pyproject\Federated-Learning-PyTorch-master\src_opt")
 sys.path.append(path)
@@ -12,7 +11,6 @@ import time
 import pickle
 import numpy as np
 from tqdm import tqdm
-import math
 
 import torch
 from tensorboardX import SummaryWriter
@@ -21,12 +19,14 @@ import torch.nn.functional as F
 from src_opt.utils.options import args_parser
 from src_opt.utils.update import LocalUpdate, test_inference
 from src_opt.utils.models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar
+from src_opt.utils.tools import get_dataset, average_weights, exp_details
+from src_opt.utils.plot import draw
 from src_opt.utils.Shapley import Shapley
-from src_opt.utils.CEXPIX import arms_selection
-from src_opt.utils.tools import get_dataset, average_weights, exp_details,avgSV_weights,softmax,unbiased_selection
+
 
 def solver():
     start_time = time.time()
+
     # define paths
     path_project = os.path.abspath('..')
     logger = SummaryWriter('../logs')
@@ -76,23 +76,15 @@ def solver():
     allAcc_list = []
     print_every = 2
     init_acc = 0
+    accuracy_list = []
 
-    global_shapley = np.zeros(args.num_users)
-    cnt_clients = np.ones(args.num_users)
-    #The prior probability of each arm been selected in one round
-    probabilities = np.array([args.frac for _ in range(args.num_users)])
-    normal_shapley = np.array([1/args.num_users for _ in range(args.num_users)])  
-
-    for epoch in range(args.epochs):
+    for epoch in tqdm(range(args.epochs)):
         local_weights, local_losses = [], []
         print(f'\n | Global Training Round : {epoch + 1} |\n')
 
         global_model.train()
         m = max(int(args.frac * args.num_users), 1)
-        idxs_users = unbiased_selection(probabilities)
-
-        print(len(idxs_users))
-        #idxs_users = np.random.choice(range(args.num_users), m, replace=False)
+        idxs_users = np.random.choice(range(args.num_users), m, replace=False)
 
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
@@ -102,59 +94,53 @@ def solver():
             local_weights.append(copy.deepcopy(w))
             local_losses.append(copy.deepcopy(loss))
 
+        Fed_sv = Shapley(local_weights, args, global_model, valid_dataset, init_acc)
+        #shapley_benchmark = Fed_sv.eval_mcshap(100)
+        #shapley_benchmark_cc = Fed_sv.eval_ccshap(50)
+        #shapley_mc = Fed_sv.eval_mcshap(5)
+        #shapley_cc = Fed_sv.eval_ccshap(5)
+        shapley_benchmark =Fed_sv.eval_ccshap_stratified(20)
+        shapley_benchmark1 =Fed_sv.eval_ccshap_stratified(20)
+        shapley_cc_str =Fed_sv.eval_ccshap_stratified(5)
+        shapley_cc_opt = Fed_sv.ccshap_optimal_sampling(5,2,0.2)
+        
 
-        weight_shapley = np.zeros(len(normal_shapley))
-        for i in range(len(weight_shapley)):
-            weight_shapley[i] = normal_shapley[i]/probabilities[i]
-        global_weights = avgSV_weights(local_weights,weight_shapley[idxs_users],original_weights)
+        # print(shapley_benchmark)
+        # print(shapley_cc)
+        # print(shapley_cc_opt)
 
-        Fed_sv = Shapley(local_weights, args, global_model                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   , valid_dataset, init_acc)
-        shapley = Fed_sv.eval_ccshap_stratified(10)
-        #update estimated Shapley value
+        # err_bench = 0
+        # for i in range(len(shapley_benchmark)):
+        #     err_bench += np.abs(shapley_benchmark[i]-shapley_benchmark_cc[i])
 
-        min_shapley = min(shapley)
-        max_shapley = max(shapley)
-        for i in range(len(shapley)):
-            global_shapley[idxs_users[i]] = global_shapley[idxs_users[i]]+(shapley[i]-min_shapley)/(max_shapley-min_shapley)
-            cnt_clients[idxs_users[i]] += 1
+        # err_mc = 0
+        # for i in range(len(shapley_benchmark)):
+        #     err_mc += np.abs(shapley_benchmark[i]-shapley_mc[i])
 
-        rem = 0
-        first_flag = True
-        for i in range(len(normal_shapley)):
-            normal_shapley[i] = global_shapley[i]/cnt_clients[i]
-        sum_shapley = sum(normal_shapley)
-        for i in range(len(normal_shapley)):
-            normal_shapley[i] = normal_shapley[i]/sum_shapley
-        #print(normal_shapley)
-        for k in range(m):
-            temp_p = np.zeros(len(normal_shapley))
-            top_k_idxs = []
-            if k > 0:
-                top_k_idxs = np.argsort(normal_shapley)[-k:]
-            temp_exp_sum = 0
-            for l in range(len(normal_shapley)):
-                if l not in top_k_idxs:
-                    temp_exp_sum += normal_shapley[l]
-            
-            for l in range(len(normal_shapley)):
-                if l not in top_k_idxs:
-                    temp_p[l] = normal_shapley[l]/temp_exp_sum*(m-k)
-                else:
-                    temp_p[l] = 1
-            temp_target = 0
-            illegal = False 
-            temp_p_sum = 0
-            for l in range(len(normal_shapley)):
-                temp_p_sum += temp_p[l]
-                if temp_p[l] > 1 or temp_p_sum > m:
-                    illegal = True
-                temp_target += normal_shapley[l]/temp_p[l]
-            if illegal:
-                continue
-            if temp_target < rem or first_flag:
-                probabilities = copy.deepcopy(temp_p)
-                rem = temp_target
-                first_flag = False
+        # err_cc = 0
+        # for i in range(len(shapley_benchmark)):
+        #     err_cc += np.abs(shapley_benchmark[i]-shapley_cc[i])
+
+        err_benchmark = 0
+        for i in range(len(shapley_benchmark)):
+            err_benchmark += np.abs(shapley_benchmark[i]-shapley_benchmark1[i])
+
+        err_cc_str = 0
+        for i in range(len(shapley_benchmark)):
+            err_cc_str += np.abs(shapley_benchmark[i]-shapley_cc_str[i])
+
+        err_cc_opt = 0
+        for i in range(len(shapley_benchmark)):
+            err_cc_opt += np.abs(shapley_benchmark[i]-shapley_cc_opt[i])
+        
+        # print("bench err: ", err_bench)
+        # print("mc err: ", err_mc)
+        # print("cc err: ", err_cc)
+        print("bench err: ", err_benchmark)
+        print("cc_str err: ", err_cc_str)
+        print("cc_opt err: ", err_cc_opt)
+        
+        global_weights = average_weights(local_weights)
 
         # update global weights
         global_model.load_state_dict(global_weights)
@@ -188,39 +174,33 @@ def solver():
     # Test inference after completion of training
     test_acc, test_loss = test_inference(args, global_model, test_dataset)
 
+    accuracy_list.append(test_acc)
+
     print(f' \n Results after {args.epochs} global rounds of training:')
     print("|---- Avg Train Accuracy: {:.2f}%".format(100 * train_accuracy[-1]))
     print("|---- Test Accuracy: {:.2f}%".format(100 * test_acc))
 
     # Saving the objects train_loss and train_accuracy:
-    # file_name = '../save/objects/{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}].pkl'. \
-    #     format(args.dataset, args.model, args.epochs, args.frac, args.iid,
-    #            args.local_ep, args.local_bs)
+    file_name = '../save/objects/{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}].pkl'. \
+        format(args.dataset, args.model, args.epochs, args.frac, args.iid,
+               args.local_ep, args.local_bs)
 
-    # with open(file_name, 'wb') as f:
-    #     pickle.dump([train_loss, train_accuracy], f)
+    with open(file_name, 'wb') as f:
+        pickle.dump([train_loss, train_accuracy], f)
 
     print('\n Total Run Time: {0:0.4f}'.format(time.time() - start_time))
-    return test_acc, train_accuracy[-1],allAcc_list
-
-def show_avg(list):
-    ans = []
-    ans.append(np.mean(list[17:22]))
-    ans.append(np.mean(list[37:42]))
-    ans.append(np.mean(list[57:62]))
-    ans.append(np.mean(list[77:82]))
-    ans.append(np.mean(list[95:]))
-    print(ans)
+    return test_acc, train_accuracy[-1],accuracy_list
 
 
 if __name__ == '__main__':
     test_acc, train_acc = 0, 0
-    for _ in range(5):
+    accuracy_list = []
+    for _ in range(1):
         print("|---- 第「{}」次 ----|".format(_ + 1))
-        test, train ,acc_list = solver()
+        test, train ,accuracy_list = solver()
         test_acc += test
         train_acc += train
-        show_avg(acc_list)
+
     print('|---------------------------------')
     print('|---------------------------------')
     print('|---------------------------------')
